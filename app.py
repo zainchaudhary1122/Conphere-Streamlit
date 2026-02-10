@@ -136,6 +136,7 @@ def process_and_count(regs):
 # =====================================================
 st.set_page_config(
     page_title="Conphere | Insights",
+    page_icon=os.getenv("APP_TITLE"),
     layout="wide"
 )
 
