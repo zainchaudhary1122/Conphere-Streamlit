@@ -25,6 +25,10 @@ LOGO_URL = os.getenv("LOGO_URL")
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "vip_lunch"
 
+if "selected_event" not in st.session_state:
+    st.session_state.selected_event = None
+
+
 
 # =====================================================
 # API HELPERS
@@ -46,26 +50,17 @@ def get_access_token():
     res.raise_for_status()
     return res.json()["access_token"]
 
-
-def fetch_regs(access_token):
+def fetch_events(access_token):
     query = """
     query {
-      regsByOrg(
+      events(
         orgSlug: "315841",
-        pidList: [991889],
-        canceled: false
+        eventsAfter: "2024-07-10T17:14:16.000Z",
+        completed: false,
+        live: true
       ) {
-        nameFirst
-        nameLast
-        email
-        productVariantName
-        form {
-          question
-          answer
-        }
-        addOns {
-          name
-        }
+        productId
+        productName
       }
     }
     """
@@ -77,11 +72,56 @@ def fetch_regs(access_token):
 
     res = requests.post(GRAPHQL_URL, headers=headers, json={"query": query})
     res.raise_for_status()
+
+    return res.json()["data"]["events"]
+
+
+def fetch_regs(access_token, product_id):
+    query = f"""
+    query {{
+      regsByOrg(
+        orgSlug: "315841",
+        pidList: [{product_id}],
+        canceled: false
+      ) {{
+        nameFirst
+        nameLast
+        email
+        productVariantName
+        form {{
+          question
+          answer
+        }}
+        addOns {{
+          name
+        }}
+      }}
+    }}
+    """
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    res = requests.post(GRAPHQL_URL, headers=headers, json={"query": query})
+    res.raise_for_status()
+
     return res.json()["data"]["regsByOrg"]
 
 
 def process_and_count(regs):
     users_by_email = {}
+    
+    if not regs:
+        summary = {
+            "vip_count": 0,
+            "lunch_count": 0,
+            "vip_and_lunch_count" : 0,
+            "vip_or_lunch_count" : 0
+        }
+        df = pd.DataFrame()
+        return summary, df
 
     for reg in regs:
         email = reg["email"].strip().lower()
@@ -146,57 +186,89 @@ st.set_page_config(
 # =====================================================
 with st.sidebar:
     st.image(LOGO_URL, width=160)
-    st.markdown("TechCon SouthWest 2026")
+    # st.markdown("## Conphere")
     st.divider()
 
-    # ---- TAB 1
-    if st.button("📊 VIP & Lunch Insights", use_container_width=True):
+    # ---- EVENT SELECTION
+    token = get_access_token()
+    events = fetch_events(token)
+
+    event_map = {e["productName"]: e["productId"] for e in events}
+
+    selected_event_name = st.selectbox(
+        "Select Event",
+        options=["-- Select an Event --"] + list(event_map.keys())
+    )
+
+    if selected_event_name != "-- Select an Event --":
+        st.session_state.selected_event = {
+            "name": selected_event_name,
+            "product_id": event_map[selected_event_name]
+        }
+
+    st.divider()
+
+    # ---- TABS (enabled only after event selection)
+    vip_disabled = st.session_state.selected_event is None
+
+    if st.button(
+        "📊 VIP & Lunch Insights",
+        use_container_width=True,
+        disabled=vip_disabled
+    ):
         st.session_state.active_tab = "vip_lunch"
+
     st.divider()
 
-    # ---- TAB 2 (DISABLED)
     st.button(
         "🕒 Check-ins (Coming Soon)",
         disabled=True,
         use_container_width=True
     )
+
     st.divider()
+
 
 
 # =====================================================
 # MAIN CONTENT
 # =====================================================
 
-# ---------- VIP & LUNCH TAB ----------
 if st.session_state.active_tab == "vip_lunch":
 
-    st.title("VIP & Lunch Insights")
-    st.caption("Events.com attendee insights (deduplicated by email)")
-    st.divider()
+    if not st.session_state.selected_event:
+        st.info("👈 Please select an event from the sidebar to continue.")
+    else:
+        event_name = st.session_state.selected_event["name"]
+        product_id = st.session_state.selected_event["product_id"]
 
-    if st.button("🔍 Generate Summary & CSV"):
-        with st.spinner("Fetching and processing data..."):
-            token = get_access_token()
-            regs = fetch_regs(token)
-            summary, df = process_and_count(regs)
-
-        # ---- SUMMARY
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("VIP Users", summary["vip_count"])
-        col2.metric("Lunch Users", summary["lunch_count"])
-        col3.metric("VIP + Lunch", summary["vip_and_lunch_count"])
-        col4.metric("VIP OR Lunch", summary["vip_or_lunch_count"])
-
+        st.title("VIP & Lunch Insights")
+        st.caption(f"Event: {event_name}")
         st.divider()
 
-        # ---- DOWNLOAD
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Download CSV",
-            data=csv,
-            file_name="vip_lunch_attendees.csv",
-            mime="text/csv"
-        )
+        if st.button("🔍 Generate Summary & CSV"):
+            with st.spinner("Fetching and processing data..."):
+                token = get_access_token()
+                regs = fetch_regs(token, product_id)
+                summary, df = process_and_count(regs)
 
-        with st.expander("Preview Data"):
-            st.dataframe(df, use_container_width=True)
+            # ---- SUMMARY
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("VIP Users", summary["vip_count"])
+            col2.metric("Lunch Users", summary["lunch_count"])
+            col3.metric("VIP + Lunch", summary["vip_and_lunch_count"])
+            col4.metric("VIP OR Lunch", summary["vip_or_lunch_count"])
+
+            st.divider()
+
+            # ---- DOWNLOAD
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Download CSV",
+                data=csv,
+                file_name=f"{event_name.replace(' ', '_')}_vip_lunch.csv",
+                mime="text/csv"
+            )
+
+            with st.expander("Preview Data"):
+                st.dataframe(df, use_container_width=True)
