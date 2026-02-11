@@ -161,6 +161,18 @@ def process_and_count(regs):
     rows = [u for u in users_by_email.values() if u["VIP"] or u["Lunch"]]
     df = pd.DataFrame(rows)
 
+    if df.empty:
+        summary = {
+            "vip_count": 0,
+            "lunch_count": 0,
+            "vip_and_lunch_count": 0,
+            "vip_or_lunch_count": 0
+        }
+        return summary, df
+
+    # ----------------------------
+    # 1️⃣ CALCULATE SUMMARY FIRST (USING BOOLEAN)
+    # ----------------------------
     summary = {
         "vip_count": int(df["VIP"].sum()),
         "lunch_count": int(df["Lunch"].sum()),
@@ -168,7 +180,19 @@ def process_and_count(regs):
         "vip_or_lunch_count": len(df)
     }
 
+    # ----------------------------
+    # 2️⃣ THEN FORMAT FOR DISPLAY
+    # ----------------------------
+
+    # Uppercase ticket types
+    df["productVariantName"] = df["productVariantName"].astype(str).str.upper()
+
+    # Convert booleans to text
+    df["VIP"] = df["VIP"].map({True: "VIP", False: ""})
+    df["Lunch"] = df["Lunch"].map({True: "LUNCH", False: ""})
+
     return summary, df
+
 
 
 # =====================================================
