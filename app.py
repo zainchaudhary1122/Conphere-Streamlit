@@ -29,6 +29,29 @@ if "selected_event" not in st.session_state:
     st.session_state.selected_event = None
 
 
+TICKET_TYPE_MAPPING = {
+    "Full-Access Registration": "Attendee",
+    "Standard Registration": "Attendee",
+    "Student Registration": "Attendee",
+    "Entrepreneur Registration": "Attendee",
+    "Exhibitor Full-Access Registration": "Exhibitor",
+    "Exhibitor Standard Registration": "Exhibitor",
+    "Second Exhibitor": "Exhibitor",
+    "Guest Full-Access Registration": "Attendee",
+    "Guest Standard Registration": "Attendee",
+    "Guest Registration with Lunch": "Attendee",
+    "Speaker": "Speaker",
+    "Sponsor": "Attendee",
+    "Volunteer": "Volunteer",
+    "Media Registration": "Attendee",
+    "Member Innovator Pass": "Attendee",
+    "Member Visionary Pass": "Attendee",
+    "Bronze Sponsorship": "Sponsor",
+    "Silver Sponsorship": "Sponsor",
+    "Gold Sponsorship": "Sponsor",
+    "Platinum Sponsorship": "Sponsor"
+}
+
 
 # =====================================================
 # API HELPERS
@@ -111,7 +134,7 @@ def fetch_regs(access_token, product_id):
 
 
 def process_and_count(regs):
-    users_by_email = {}
+    users_by_email = []
     
     if not regs:
         summary = {
@@ -125,50 +148,47 @@ def process_and_count(regs):
 
     for reg in regs:
         email = reg["email"].strip().lower()
+        ticket_type = reg.get("productVariantName", "")
+
+        # Check if the ticket type exists in the mapping
+        entity_type = TICKET_TYPE_MAPPING.get(ticket_type, None)
+
+        # If the ticket type doesn't match any entity type, skip the registration
+        if entity_type is None:
+            continue  # Skip this iteration and do not add this registration
 
         vip = False
         lunch = False
         title = None
         company = None
 
+        # Extract form data
         for f in reg.get("form", []):
             if f["question"] == "Job Title":
                 title = f["answer"]
             elif f["question"] == "Company Name":
                 company = f["answer"]
 
+        # Check add-ons for VIP and Lunch
         for addon in reg.get("addOns", []):
             if addon["name"] == "Lunch":
                 lunch = True
             elif addon["name"] == "Yes":
                 vip = True
 
-        if email not in users_by_email:
-            users_by_email[email] = {
-                "nameFirst": reg["nameFirst"],
-                "nameLast": reg["nameLast"],
-                "email": reg["email"],
-                "productVariantName": reg["productVariantName"],
-                "Title": title,
-                "Company": company,
-                "VIP": vip,
-                "Lunch": lunch
-            }
-        else:
-            users_by_email[email]["VIP"] |= vip
-            users_by_email[email]["Lunch"] |= lunch
+        # Add the registration to the list if ticket type is valid
+        users_by_email.append({
+            "nameFirst": reg["nameFirst"],
+            "nameLast": reg["nameLast"],
+            "email": reg["email"],
+            "EntityType": entity_type.upper(),
+            "Title": title,
+            "Company": company,
+            "VIP": vip,
+            "Lunch": lunch
+        })
 
-    rows = [u for u in users_by_email.values() if u["VIP"] or u["Lunch"]]
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        summary = {
-            "vip_count": 0,
-            "lunch_count": 0,
-            "vip_and_lunch_count": 0,
-            "vip_or_lunch_count": 0
-        }
-        return summary, df
+    df = pd.DataFrame(users_by_email)
 
     # ----------------------------
     # 1️⃣ CALCULATE SUMMARY FIRST (USING BOOLEAN)
@@ -183,16 +203,14 @@ def process_and_count(regs):
     # ----------------------------
     # 2️⃣ THEN FORMAT FOR DISPLAY
     # ----------------------------
-
-    # Uppercase ticket types
-    df["productVariantName"] = df["productVariantName"].astype(str).str.upper()
-
-    # Convert booleans to text
     df["VIP"] = df["VIP"].map({True: "VIP", False: ""})
     df["Lunch"] = df["Lunch"].map({True: "LUNCH", False: ""})
 
-    return summary, df
+    # Drop the old `productVariantName` column if it exists
+    if "productVariantName" in df.columns:
+        df.drop(columns=["productVariantName"], inplace=True)
 
+    return summary, df
 
 
 # =====================================================
