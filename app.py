@@ -178,10 +178,10 @@ def process_and_count(regs):
 
         # Add the registration to the list if ticket type is valid
         users_by_email.append({
-            "nameFirst": reg["nameFirst"],
-            "nameLast": reg["nameLast"],
-            "email": reg["email"],
-            "EntityType": entity_type.upper(),
+            "First Name": reg["nameFirst"],
+            "Last Name": reg["nameLast"],
+            "Email": reg["email"],
+            "Ticket Type": entity_type.upper(),
             "Title": title,
             "Company": company,
             "VIP": vip,
