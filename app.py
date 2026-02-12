@@ -142,6 +142,8 @@ def process_registration_data(file):
         'Attendee First Name',
         'Attendee Last Name',
         'Attendee Email',
+        'Attendee Job Title',
+        'Attendee Company Name',
         'Registration/Ticket Type',
         'Lunch (Included)',
         'Guest Lunch Ticket',
@@ -197,6 +199,8 @@ def process_registration_data(file):
                 'Attendee First Name': attendee_row['Attendee First Name'],
                 'Attendee Last Name': attendee_row['Attendee Last Name'],
                 'Attendee Email': attendee_row['Attendee Email'],
+                'Job Title': attendee_row.get('Attendee Job Title', ''),
+                'Company Name': attendee_row.get('Attendee Company Name', ''),
                 'EntityType': map_entity_type(attendee_row.get('Registration/Ticket Type', ''))
             }
             
@@ -293,6 +297,7 @@ with st.sidebar:
             """
             **Processing Logic:**
             - ✓ Auto-detects column headers (Row 1 or Row 3)
+            - ✓ Includes Attendee Job Title and Company Name
             - ✓ Checks 6 ticket columns
             - ✓ Distributes guest tickets across attendees
             - ✓ Maps entity types from ticket types
