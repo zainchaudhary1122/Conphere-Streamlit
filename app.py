@@ -133,9 +133,9 @@ def process_registration_data(file):
     """
     Process Excel file with VIP and Lunch distribution logic.
     Handles multiple attendees under the same buyer.
-    """
-    df = pd.read_excel(file)
     
+    Intelligently detects column headers - tries row 1 first, then row 3 if needed.
+    """
     # Required columns
     required_columns = [
         'Buyer Email',
@@ -151,10 +151,25 @@ def process_registration_data(file):
         'Purchase VIP Social'
     ]
     
+    # Try reading with header at row 0 (first row)
+    df = pd.read_excel(file, header=0)
+    
     # Check if all required columns exist
     missing_cols = [col for col in required_columns if col not in df.columns]
+    
+    # If columns not found in first row, try row 2 (which is the 3rd row, 0-indexed)
     if missing_cols:
-        raise ValueError(f"Missing columns: {missing_cols}")
+        # Reset file pointer and try with header at row 2 (3rd row)
+        df = pd.read_excel(file, header=2)
+        
+        # Check again if columns exist
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        
+        if missing_cols:
+            raise ValueError(
+                f"Required columns not found in row 1 or row 3. Missing: {missing_cols}\n"
+                f"Please ensure your Excel file has headers either in row 1 or row 3 with the correct column names."
+            )
     
     # Filter to required columns
     df = df[required_columns].copy()
@@ -277,6 +292,7 @@ with st.sidebar:
         st.info(
             """
             **Processing Logic:**
+            - ✓ Auto-detects column headers (Row 1 or Row 3)
             - ✓ Checks 6 ticket columns
             - ✓ Distributes guest tickets across attendees
             - ✓ Maps entity types from ticket types
