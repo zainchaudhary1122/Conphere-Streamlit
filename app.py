@@ -1,316 +1,444 @@
 import os
-from dotenv import load_dotenv
+import re
 import streamlit as st
 import pandas as pd
-import requests
-from urllib.parse import urlencode
-
-load_dotenv()
+from dotenv import load_dotenv
+from collections import defaultdict
 
 # -----------------------
 # CONFIG
 # -----------------------
-TOKEN_URL = os.getenv("TOKEN_URL")
-GRAPHQL_URL = os.getenv("GRAPHQL_URL")
+load_dotenv()
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
-
-LOGO_URL = os.getenv("LOGO_URL")
+LOGO_URL = os.getenv("LOGO_URL", "")  # Optional logo URL
 
 # =====================================================
-# SESSION STATE (TAB CONTROL)
+# ENTITY TYPE MAPPING
 # =====================================================
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "vip_lunch"
-
-if "selected_event" not in st.session_state:
-    st.session_state.selected_event = None
-
-
 TICKET_TYPE_MAPPING = {
-    "Full-Access Registration": "Attendee",
-    "Standard Registration": "Attendee",
-    "Student Registration": "Attendee",
-    "Entrepreneur Registration": "Attendee",
-    "Exhibitor Full-Access Registration": "Exhibitor",
-    "Exhibitor Standard Registration": "Exhibitor",
-    "Second Exhibitor": "Exhibitor",
-    "Guest Full-Access Registration": "Attendee",
-    "Guest Standard Registration": "Attendee",
-    "Guest Registration with Lunch": "Attendee",
-    "Speaker": "Speaker",
-    "Sponsor": "Attendee",
-    "Volunteer": "Volunteer",
-    "Media Registration": "Attendee",
-    "Member Innovator Pass": "Attendee",
-    "Member Visionary Pass": "Attendee",
-    "Bronze Sponsorship": "Sponsor",
-    "Silver Sponsorship": "Sponsor",
-    "Gold Sponsorship": "Sponsor",
-    "Platinum Sponsorship": "Sponsor"
+    "Full-Access Registration": "ATTENDEE",
+    "Standard Registration": "ATTENDEE",
+    "Student Registration": "ATTENDEE",
+    "Entrepreneur Registration": "ATTENDEE",
+    "Exhibitor Full-Access Registration": "EXHIBITOR",
+    "Exhibitor Standard Registration": "EXHIBITOR",
+    "Second Exhibitor": "EXHIBITOR",
+    "Guest Full-Access Registration": "ATTENDEE",
+    "Guest Standard Registration": "ATTENDEE",
+    "Guest Registration with Lunch": "ATTENDEE",
+    "Speaker": "SPEAKER",
+    "Sponsor": "SPONSOR",
+    "Volunteer": "VOLUNTEER",
+    "Media Registration": "ATTENDEE",
+    "Member Innovator Pass": "ATTENDEE",
+    "Member Visionary Pass": "ATTENDEE",
+    "Bronze Sponsorship": "SPONSOR",
+    "Silver Sponsorship": "SPONSOR",
+    "Gold Sponsorship": "SPONSOR",
+    "Platinum Sponsorship": "SPONSOR"
 }
 
-
 # =====================================================
-# API HELPERS
+# UTILITY FUNCTIONS
 # =====================================================
-def get_access_token():
-    payload = urlencode({
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN,
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-    })
 
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json"
-    }
-
-    res = requests.post(TOKEN_URL, data=payload, headers=headers, timeout=30)
-    res.raise_for_status()
-    return res.json()["access_token"]
-
-def fetch_events(access_token):
-    query = """
-    query {
-      events(
-        orgSlug: "315841",
-        eventsAfter: "2024-07-10T17:14:16.000Z",
-        completed: false,
-        live: true
-      ) {
-        productId
-        productName
-      }
-    }
+def extract_quantity_from_string(value):
     """
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-
-    res = requests.post(GRAPHQL_URL, headers=headers, json={"query": query})
-    res.raise_for_status()
-
-    return res.json()["data"]["events"]
-
-
-def fetch_regs(access_token, product_id):
-    query = f"""
-    query {{
-      regsByOrg(
-        orgSlug: "315841",
-        pidList: [{product_id}],
-        canceled: false
-      ) {{
-        nameFirst
-        nameLast
-        email
-        productVariantName
-        form {{
-          question
-          answer
-        }}
-        addOns {{
-          name
-        }}
-      }}
-    }}
+    Extract quantity from strings like "2 'Lunch' - Not Picked Up" or "1 'Yes' - Not Picked Up"
+    Returns the quantity as an integer, or 0 if not found.
     """
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-
-    res = requests.post(GRAPHQL_URL, headers=headers, json={"query": query})
-    res.raise_for_status()
-
-    return res.json()["data"]["regsByOrg"]
-
-
-def process_and_count(regs):
-    users_by_email = []
+    if pd.isna(value) or value == '':
+        return 0
     
-    if not regs:
-        summary = {
-            "vip_count": 0,
-            "lunch_count": 0,
-            "vip_and_lunch_count" : 0,
-            "vip_or_lunch_count" : 0
-        }
-        df = pd.DataFrame()
-        return summary, df
+    value_str = str(value).strip()
+    
+    # Try to find a number at the start of the string
+    match = re.match(r'^(\d+)', value_str)
+    if match:
+        return int(match.group(1))
+    
+    return 0
 
-    for reg in regs:
-        email = reg["email"].strip().lower()
-        ticket_type = reg.get("productVariantName", "")
 
-        # Check if the ticket type exists in the mapping
-        entity_type = TICKET_TYPE_MAPPING.get(ticket_type, None)
+def check_lunch_status(row):
+    """
+    Check all lunch-related columns and determine if lunch is included.
+    Returns "LUNCH" if any lunch is available, "" otherwise.
+    Handles "No Lunch" cases (explicit negation).
+    """
+    lunch_columns = [
+        'Lunch (Included)',
+        'Guest Lunch Ticket',
+        'Purchase Lunch'
+    ]
+    
+    for col in lunch_columns:
+        if col in row and pd.notna(row[col]):
+            value_str = str(row[col]).lower()
+            
+            # Check for explicit "No Lunch" (negative indicator)
+            if 'no lunch' in value_str:
+                continue  # Skip this column if explicitly "No Lunch"
+            
+            # Check for positive indicators: "Lunch" or quantity > 0
+            if ('lunch' in value_str or extract_quantity_from_string(row[col]) > 0):
+                return "LUNCH"
+    
+    return ""
 
-        # If the ticket type doesn't match any entity type, skip the registration
-        if entity_type is None:
-            continue  # Skip this iteration and do not add this registration
 
-        vip = False
-        lunch = False
-        title = None
-        company = None
+def check_vip_status(row):
+    """
+    Check all VIP-related columns and determine if VIP is included.
+    Returns "VIP" if any VIP is available, "" otherwise.
+    Handles "No" cases as well.
+    """
+    vip_columns = [
+        'VIP Social (Included)',
+        'Guest VIP Social Ticket',
+        'Purchase VIP Social'
+    ]
+    
+    for col in vip_columns:
+        if col in row and pd.notna(row[col]):
+            value_str = str(row[col]).lower()
+            
+            # Check for negative indicators first (No, etc.)
+            if '"no"' in value_str:
+                continue  # Skip this column if explicitly "No"
+            
+            # Check for positive indicators
+            if ('yes' in value_str or extract_quantity_from_string(row[col]) > 0):
+                return "VIP"
+    
+    return ""
 
-        # Extract form data
-        for f in reg.get("form", []):
-            if f["question"] == "Job Title":
-                title = f["answer"]
-            elif f["question"] == "Company Name":
-                company = f["answer"]
 
-        # Check add-ons for VIP and Lunch
-        for addon in reg.get("addOns", []):
-            if addon["name"] == "Lunch":
-                lunch = True
-            elif addon["name"] == "Yes":
-                vip = True
+def map_entity_type(ticket_type):
+    """
+    Map registration/ticket type to entity type.
+    """
+    if pd.isna(ticket_type):
+        return "ATTENDEE"
+    
+    ticket_str = str(ticket_type).strip()
+    return TICKET_TYPE_MAPPING.get(ticket_str, "ATTENDEE")
 
-        # Add the registration to the list if ticket type is valid
-        users_by_email.append({
-            "First Name": reg["nameFirst"],
-            "Last Name": reg["nameLast"],
-            "Email": reg["email"],
-            "Ticket Type": entity_type.upper(),
-            "Title": title,
-            "Company": company,
-            "VIP": vip,
-            "Lunch": lunch
-        })
 
-    df = pd.DataFrame(users_by_email)
+# =====================================================
+# MAIN PROCESSING FUNCTION
+# =====================================================
 
-    # ----------------------------
-    # 1️⃣ CALCULATE SUMMARY FIRST (USING BOOLEAN)
-    # ----------------------------
+def process_registration_data(file):
+    """
+    Process Excel file with VIP and Lunch distribution logic.
+    Handles multiple attendees under the same buyer.
+    """
+    df = pd.read_excel(file)
+    
+    # Required columns
+    required_columns = [
+        'Buyer Email',
+        'Attendee First Name',
+        'Attendee Last Name',
+        'Attendee Email',
+        'Registration/Ticket Type',
+        'Lunch (Included)',
+        'Guest Lunch Ticket',
+        'Purchase Lunch',
+        'VIP Social (Included)',
+        'Guest VIP Social Ticket',
+        'Purchase VIP Social'
+    ]
+    
+    # Check if all required columns exist
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing columns: {missing_cols}")
+    
+    # Filter to required columns
+    df = df[required_columns].copy()
+    
+    # Remove rows with missing critical data
+    df = df.dropna(subset=['Buyer Email', 'Attendee Email', 'Attendee First Name', 'Attendee Last Name'])
+    
+    # Group by Buyer Email to identify multiple attendees per buyer
+    buyer_groups = df.groupby('Buyer Email')
+    
+    processed_rows = []
+    
+    for buyer_email, group in buyer_groups:
+        # Get the first row to extract guest ticket info
+        first_row = group.iloc[0]
+        
+        # Extract quantities from guest ticket columns
+        guest_lunch_qty = extract_quantity_from_string(first_row.get('Guest Lunch Ticket', 0))
+        guest_vip_qty = extract_quantity_from_string(first_row.get('Guest VIP Social Ticket', 0))
+        
+        num_attendees = len(group)
+        
+        for idx, (_, attendee_row) in enumerate(group.iterrows()):
+            output_row = {
+                'Attendee First Name': attendee_row['Attendee First Name'],
+                'Attendee Last Name': attendee_row['Attendee Last Name'],
+                'Attendee Email': attendee_row['Attendee Email'],
+                'EntityType': map_entity_type(attendee_row.get('Registration/Ticket Type', ''))
+            }
+            
+            # Determine VIP and Lunch status
+            # Priority: Guest columns (if qty > 0) > Individual columns (Lunch (Included), VIP Social (Included), Purchase columns)
+            
+            # Check VIP
+            if guest_vip_qty > 0 and idx < guest_vip_qty:
+                # Distribute guest VIP tickets across attendees
+                output_row['VIP'] = 'VIP'
+            else:
+                # Check individual VIP columns
+                output_row['VIP'] = check_vip_status(attendee_row)
+            
+            # Check Lunch
+            if guest_lunch_qty > 0 and idx < guest_lunch_qty:
+                # Distribute guest lunch tickets across attendees
+                output_row['Lunch'] = 'LUNCH'
+            else:
+                # Check individual lunch columns
+                output_row['Lunch'] = check_lunch_status(attendee_row)
+            
+            processed_rows.append(output_row)
+    
+    result_df = pd.DataFrame(processed_rows)
+    
+    return result_df
+
+
+# =====================================================
+# CALCULATE SUMMARY STATISTICS
+# =====================================================
+
+def calculate_summary(df):
+    """
+    Calculate summary statistics from processed data.
+    """
     summary = {
-        "vip_count": int(df["VIP"].sum()),
-        "lunch_count": int(df["Lunch"].sum()),
-        "vip_and_lunch_count": int((df["VIP"] & df["Lunch"]).sum()),
-        "vip_or_lunch_count": len(df)
+        "total_attendees": len(df),
+        "vip_count": int((df["VIP"] == "VIP").sum()),
+        "lunch_count": int((df["Lunch"] == "LUNCH").sum()),
+        "vip_and_lunch_count": int(((df["VIP"] == "VIP") & (df["Lunch"] == "LUNCH")).sum()),
+        "vip_only": int(((df["VIP"] == "VIP") & (df["Lunch"] != "LUNCH")).sum()),
+        "lunch_only": int(((df["VIP"] != "VIP") & (df["Lunch"] == "LUNCH")).sum()),
     }
-
-    # ----------------------------
-    # 2️⃣ THEN FORMAT FOR DISPLAY
-    # ----------------------------
-    df["VIP"] = df["VIP"].map({True: "VIP", False: ""})
-    df["Lunch"] = df["Lunch"].map({True: "LUNCH", False: ""})
-
-    # Drop the old `productVariantName` column if it exists
-    if "productVariantName" in df.columns:
-        df.drop(columns=["productVariantName"], inplace=True)
-
-    return summary, df
+    
+    # Entity type breakdown
+    summary["entity_breakdown"] = df['EntityType'].value_counts().to_dict()
+    
+    return summary
 
 
 # =====================================================
 # PAGE CONFIG
 # =====================================================
+
 st.set_page_config(
-    page_title="Conphere | Insights",
+    page_title="Conphere | Registration Insights",
     page_icon=os.getenv("APP_TITLE"),
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+st.markdown("""
+<style>
+    [data-testid="stMetricDelta"] {
+        font-size: 14px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================================
-# SIDEBAR (TABS)
+# SIDEBAR (UPLOAD FILE)
 # =====================================================
+
 with st.sidebar:
-    st.image(LOGO_URL, width=160)
-    # st.markdown("## Conphere")
+    if LOGO_URL:
+        st.image(LOGO_URL, width=160)
+    
+    st.markdown("### 📋 Upload Registration Data")
     st.divider()
-
-    # ---- EVENT SELECTION
-    token = get_access_token()
-    events = fetch_events(token)
-
-    event_map = {e["productName"]: e["productId"] for e in events}
-
-    selected_event_name = st.selectbox(
-        "Select Event",
-        options=["-- Select an Event --"] + list(event_map.keys())
+    
+    uploaded_file = st.file_uploader(
+        "Choose an Excel file",
+        type="xlsx",
+        help="Upload your RegistrationReport Excel file"
     )
-
-    if selected_event_name != "-- Select an Event --":
-        st.session_state.selected_event = {
-            "name": selected_event_name,
-            "product_id": event_map[selected_event_name]
-        }
-
-    st.divider()
-
-    # ---- TABS (enabled only after event selection)
-    vip_disabled = st.session_state.selected_event is None
-
-    if st.button(
-        "📊 VIP & Lunch Insights",
-        use_container_width=True,
-        disabled=vip_disabled
-    ):
-        st.session_state.active_tab = "vip_lunch"
-
-    st.divider()
-
-    st.button(
-        "🕒 Check-ins (Coming Soon)",
-        disabled=True,
-        use_container_width=True
-    )
-
-    st.divider()
-
-
+    
+    if uploaded_file is not None:
+        st.success("✅ File uploaded successfully!")
+        st.divider()
+        st.markdown("#### 📌 Processing Info")
+        st.info(
+            """
+            **Processing Logic:**
+            - ✓ Checks 6 ticket columns
+            - ✓ Distributes guest tickets across attendees
+            - ✓ Maps entity types from ticket types
+            - ✓ Extracts quantities from text values
+            """
+        )
 
 # =====================================================
 # MAIN CONTENT
 # =====================================================
 
-if st.session_state.active_tab == "vip_lunch":
-
-    if not st.session_state.selected_event:
-        st.info("👈 Please select an event from the sidebar to continue.")
-    else:
-        event_name = st.session_state.selected_event["name"]
-        product_id = st.session_state.selected_event["product_id"]
-
-        st.title("VIP & Lunch Insights")
-        st.caption(f"Event: {event_name}")
+if uploaded_file is not None:
+    try:
+        # Process the data
+        processed_df = process_registration_data(uploaded_file)
+        summary = calculate_summary(processed_df)
+        
+        # Header
+        st.title("🎟️ VIP & Lunch Insights")
+        st.caption(f"Registration data processed | Total Attendees: {summary['total_attendees']}")
+        
         st.divider()
-
-        if st.button("🔍 Generate Summary & CSV"):
-            with st.spinner("Fetching and processing data..."):
-                token = get_access_token()
-                regs = fetch_regs(token, product_id)
-                summary, df = process_and_count(regs)
-
-            # ---- SUMMARY
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("VIP Users", summary["vip_count"])
-            col2.metric("Lunch Users", summary["lunch_count"])
-            col3.metric("VIP + Lunch", summary["vip_and_lunch_count"])
-            col4.metric("VIP OR Lunch", summary["vip_or_lunch_count"])
-
-            st.divider()
-
-            # ---- DOWNLOAD
-            csv = df.to_csv(index=False).encode("utf-8")
+        
+        # Summary Metrics
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        col1.metric(
+            "👥 Total Attendees",
+            summary["total_attendees"],
+            help="Total number of attendees in the report"
+        )
+        col2.metric(
+            "🌟 VIP Users",
+            summary["vip_count"],
+            help="Attendees with VIP access"
+        )
+        col3.metric(
+            "🍽️ Lunch Users",
+            summary["lunch_count"],
+            help="Attendees with lunch included"
+        )
+        col4.metric(
+            "⭐ VIP + Lunch",
+            summary["vip_and_lunch_count"],
+            help="Attendees with both VIP and Lunch"
+        )
+        col5.metric(
+            "📊 VIP OR Lunch",
+            summary["vip_only"] + summary["lunch_only"],
+            help="Attendees with either VIP or Lunch (but not both)"
+        )
+        
+        st.divider()
+        
+        # Entity Type Breakdown
+        if summary["entity_breakdown"]:
+            st.markdown("### 📈 Entity Type Breakdown")
+            entity_col1, entity_col2 = st.columns(2)
+            
+            with entity_col1:
+                entity_data = pd.DataFrame(
+                    list(summary["entity_breakdown"].items()),
+                    columns=["Entity Type", "Count"]
+                )
+                st.bar_chart(entity_data.set_index("Entity Type"))
+            
+            with entity_col2:
+                st.dataframe(entity_data, use_container_width=True, hide_index=True)
+        
+        st.divider()
+        
+        # Download Section
+        st.markdown("### 📥 Download Results")
+        
+        csv = processed_df.to_csv(index=False).encode("utf-8")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
             st.download_button(
-                "⬇️ Download CSV",
+                "📥 Download as CSV",
                 data=csv,
-                file_name=f"{event_name.replace(' ', '_')}_vip_lunch.csv",
-                mime="text/csv"
+                file_name="processed_vip_lunch_insights.csv",
+                mime="text/csv",
+                use_container_width=True
             )
+        
+        with col2:
+            # Excel download
+            buffer = pd.ExcelWriter('processed_vip_lunch_insights.xlsx', engine='openpyxl')
+            processed_df.to_excel(buffer, index=False, sheet_name='Attendees')
+            buffer.close()
+            
+            with open('processed_vip_lunch_insights.xlsx', 'rb') as f:
+                st.download_button(
+                    "📊 Download as Excel",
+                    data=f,
+                    file_name="processed_vip_lunch_insights.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+        
+        st.divider()
+        
+        # Data Preview
+        st.markdown("### 👀 Data Preview")
+        
+        with st.expander("View Full Dataset", expanded=False):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown("**Processed Attendee Data**")
+            
+            with col2:
+                # Filter options
+                filter_col = st.selectbox(
+                    "Filter by:",
+                    ["All", "VIP Only", "Lunch Only", "VIP + Lunch", "No VIP/Lunch"],
+                    key="filter_select"
+                )
+            
+            # Apply filters
+            if filter_col == "VIP Only":
+                display_df = processed_df[(processed_df["VIP"] == "VIP") & (processed_df["Lunch"] != "LUNCH")]
+            elif filter_col == "Lunch Only":
+                display_df = processed_df[(processed_df["VIP"] != "VIP") & (processed_df["Lunch"] == "LUNCH")]
+            elif filter_col == "VIP + Lunch":
+                display_df = processed_df[(processed_df["VIP"] == "VIP") & (processed_df["Lunch"] == "LUNCH")]
+            elif filter_col == "No VIP/Lunch":
+                display_df = processed_df[(processed_df["VIP"] != "VIP") & (processed_df["Lunch"] != "LUNCH")]
+            else:
+                display_df = processed_df
+            
+            st.dataframe(display_df, use_container_width=True, height=400)
+            st.caption(f"Showing {len(display_df)} of {len(processed_df)} attendees")
 
-            with st.expander("Preview Data"):
-                st.dataframe(df, use_container_width=True)
+    except Exception as e:
+        st.error(f"❌ Error processing file: {str(e)}")
+        st.info("Please ensure your Excel file contains all required columns.")
+    else:
+        # Initial state - no file uploaded
+        st.markdown("""
+            # 🎟️ VIP & Lunch Processing Tool
+            
+            Welcome to the registration insights tool. This application processes your registration data
+            to identify VIP and Lunch ticket holders.
+            
+            ## How it works:
+            
+            1. **Upload** your RegistrationReport Excel file using the sidebar
+            2. **Process** automatically handles multiple attendees per buyer
+            3. **Distribute** guest tickets across attendees with same buyer email
+            4. **Download** results in CSV or Excel format
+            
+            ## Key Features:
+            
+            - ✅ Checks all 6 VIP and Lunch columns
+            - ✅ Distributes guest tickets correctly across multiple attendees
+            - ✅ Maps entity types from ticket types
+            - ✅ Extracts quantities from text values
+            - ✅ Provides summary statistics
+            - ✅ Export results in multiple formats
+            
+            **Ready to get started?** Upload your file in the sidebar!
+        """)
